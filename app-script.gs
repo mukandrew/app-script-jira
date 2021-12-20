@@ -2,8 +2,22 @@ const jiraPageEndpoint = 'https://<project-name>.atlassian.net';
 const username = 'YOUR JIRA EMAIL';
 const jiraToken = 'YOUR JIRA TOKEN';
 const projectKey = 'PROJECT KEY';
-const issueTypeKey = 'ISSUE KEY';
-const storyPtsKey = 'STORY POINT NAME'
+
+const colunmIndexes = {
+    parentId: 0,
+    story: 1,
+    summary: 2,
+    storyPoints: 3,
+    description: 4,
+    labels: 5,
+    assignee: 6,
+    priority: 7,
+    ignore: 8,
+    issueId: 9,
+    link: 10
+};
+
+const maxColunms = 11;
 
 function onOpen() {
     SpreadsheetApp.getUi()
@@ -13,8 +27,7 @@ function onOpen() {
 }
 
 function showPrompt() {
-    var ui = SpreadsheetApp.getUi(); // Same variations.
-
+    var ui = SpreadsheetApp.getUi();
     var result = ui.prompt(
         'Ok, let\'s do it',
         'Please enter the sheet name:',
@@ -34,7 +47,8 @@ function showAlert(sheetName) {
     var result = ui.alert(
         'Please confirm',
         'Are you sure you want to continue and upload the sheet "' + sheetName + '"?',
-        ui.ButtonSet.YES_NO);
+        ui.ButtonSet.YES_NO
+    );
 
     if (result == ui.Button.YES) {
         handler(sheetName)
@@ -49,19 +63,21 @@ const ParentKey = function (key) {
     this.key = key
 }
 
-// Check in your project, some project is (Sub-task, Bug, Epic)
 const IssueType = function () {
-    this.key = issueTypeKey;
+    this.id = "10003";
 }
 
-const Issue = function (parentKey, summary, storyPts, description, labels) {
+const Issue = function (parentKey, summary, description, labels, project, storyPts, priority, assignee) {
     this.summary = summary;
-    this.project = new Project();
+    this.project = project;
     this.parent = new ParentKey(parentKey);
     this.issuetype = new IssueType();
     this.description = description;
     this.labels = labels.split(",");
-    this[storyPtsKey] = parseInt(storyPts)
+    /* this field is a custom field, check in your Jira to get the name in your org */
+    this['customfield_10026'] = parseInt(storyPts);
+    if (priority.id != '') this.priority = priority;
+    if (assignee.accountId != '') this.assignee = assignee;
 }
 
 const BodyRequest = function (fields) {
@@ -69,52 +85,113 @@ const BodyRequest = function (fields) {
     this.fields = fields;
 }
 
-function createIssue(payload) {
+const Priority = function (priority, sheet) {
+    if (priority == '') {
+        this.id = '';
+        return;
+    }
+
+    for (var row = 2; row <= sheet.getMaxRows(); row++) {
+        var values = sheet.getRange(row, 4, 1, 2).getValues()[0];
+        if (priority == values[1]) {
+            this.id = values[0];
+        }
+    }
+}
+
+const Assignee = function (assignee, sheet) {
+    if (assignee == '') {
+        this.accountId = '';
+        return;
+    }
+
+    for (var row = 2; row <= sheet.getMaxRows(); row++) {
+        var values = sheet.getRange(row, 1, 1, 2).getValues()[0];
+        if (assignee == values[1]) {
+            this.accountId = values[0];
+        }
+    }
+}
+
+function createIssue(payload, issueId) {
     const headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Authorization": "Basic " + Utilities.base64Encode(username + ":" + jiraToken)
     };
 
+    /* if has issue ID inserted in the sheet, this is to update */
+    const toUpdated = issueId != ''
+    const method = issueId == '' ? 'post' : 'put';
+
     const options = {
-        'method': 'post',
+        'method': method,
         'headers': headers,
         'payload': JSON.stringify(new BodyRequest(payload))
     };
+    const endpoint = jiraPageEndpoint + '/rest/api/2/issue' + (toUpdated ? ('/' + issueId) : '');
+
     Logger.log(options.payload);
+
     try {
-        var response = UrlFetchApp.fetch(jiraPageEndpoint + '/rest/api/2/issue', options);
-        var responseJSON = JSON.parse(response.getContentText());
+        var response = UrlFetchApp.fetch(endpoint, options);
+        var responseJSON = toUpdated ? { key: issueId } : JSON.parse(response.getContentText());
         return responseJSON
     } catch (e) {
         return { key: 'Error', self: e.message }
     }
 }
 
-// The sheet needs to be the
 function handler(sheetName) {
-    const parentKeyIndex = 0
-    const summaryIndex = 2
-    const storyPtsIndex = 3
-    const descriptionIndex = 4
-    const labelsIndex = 5
-    const ignoreIndex = 6
-
     const spreadSheet = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = spreadSheet.getSheetByName(sheetName);
+    const dataSheet = spreadSheet.getSheetByName('data');
+    const project = new Project();
+
+    var resut = { success: 0, errors: 0 }
 
     for (var row = 2; row <= sheet.getMaxRows(); row++) {
-        var values = sheet.getRange(row, 1, 1, 7).getValues()[0];
-        if (values[ignoreIndex] == false) {
-            var issue = new Issue(values[parentKeyIndex], values[summaryIndex], values[storyPtsIndex], values[descriptionIndex], values[labelsIndex]);
-            var response = createIssue(issue);
+        var values = sheet.getRange(row, 1, 1, maxColunms).getValues()[0];
+
+        const line = {
+            parentId: values[colunmIndexes.parentId],
+            story: values[colunmIndexes.story],
+            summary: values[colunmIndexes.summary],
+            storyPoints: values[colunmIndexes.storyPoints],
+            description: values[colunmIndexes.description],
+            labels: values[colunmIndexes.labels],
+            assignee: values[colunmIndexes.assignee],
+            priority: values[colunmIndexes.priority],
+            ignore: values[colunmIndexes.ignore],
+            issueId: values[colunmIndexes.issueId]
+        }
+
+        if (line.ignore == false || (line.ignore == false && line.issueId != '')) {
+            var priority = new Priority(line.priority, dataSheet);
+            var assignee = new Assignee(line.assignee, dataSheet);
+            var issue = new Issue(
+                line.parentId,
+                line.summary,
+                line.description,
+                line.labels,
+                project,
+                line.storyPoints,
+                priority,
+                assignee
+            );
+
+            var response = createIssue(issue, line.issueId);
+
             if (response.key != 'Error') {
-                sheet.getRange(row, 7).setValue(true)
-                sheet.getRange(row, 9).setValue(jiraPageEndpoint + 'browse/' + response.key);
+                sheet.getRange(row, colunmIndexes.ignore + 1).setValue(true)
+                sheet.getRange(row, colunmIndexes.link + 1).setValue(jiraPageEndpoint + '/browse/' + response.key);
+                sheet.getRange(row, colunmIndexes.issueId + 1).setValue(response.key);
+                resut.success += 1;
             } else {
-                sheet.getRange(row, 9).setValue(response.self);
+                sheet.getRange(row, colunmIndexes.link + 1).setValue(response.self);
+                resut.errors += 1;
             }
-            sheet.getRange(row, 8).setValue(response.key);
         }
     }
+    spreadSheet.toast('Result: ' + resut.success + ' issues was sent successfully and ' + resut.errors + ' issues had problem sending', 'Finished')
 }
